@@ -1,0 +1,67 @@
+{
+	"name": "workflow-world-surrealdb",
+	"version": "0.1.0",
+	"description": "A SurrealDB-backed World implementation that uses LIVE SELECT for queueing and streaming",
+	"type": "module",
+	"packageManager": "pnpm@10.33.0",
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"bin": {
+		"workflow-surreal-setup": "./bin/setup.js"
+	},
+	"files": [
+		"dist",
+		"bin",
+		"docker-compose.yml"
+	],
+	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/sepcnt/workflow-world-surrealdb.git"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./cli": {
+			"types": "./dist/cli.d.ts",
+			"default": "./dist/cli.js"
+		}
+	},
+	"scripts": {
+		"build": "tsc",
+		"dev": "tsc --watch",
+		"clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+		"lint": "biome check",
+		"format": "biome format --write",
+		"test": "vitest run",
+		"typecheck": "tsc --noEmit",
+		"db:push": "node dist/cli.js"
+	},
+	"dependencies": {
+		"@vercel/queue": "0.1.4",
+		"@workflow/errors": "4.1.0-beta.19",
+		"@workflow/utils": "4.1.0-beta.13",
+		"@workflow/world": "4.1.0-beta.14",
+		"@workflow/world-local": "4.1.0-beta.47",
+		"dotenv": "17.3.1",
+		"surrealdb": "2.0.3",
+		"ulid": "~3.0.2",
+		"zod": "4.3.6"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.4.11",
+		"@types/node": "22.19.0",
+		"testcontainers": "11.12.0",
+		"typescript": "^5.9.3",
+		"vitest": "^4.1.4"
+	},
+	"keywords": [
+		"workflow",
+		"surrealdb",
+		"workflow-world",
+		"durable application"
+	],
+	"author": ""
+}

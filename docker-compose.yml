@@ -1,0 +1,16 @@
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v3
+    command: >
+      start
+      --user root
+      --pass ${SURREAL_DB_PASS:-root}
+      --bind 0.0.0.0:8000
+      "surrealkv:///data/workflow.db?versioned=true"
+    ports:
+      - '${SURREAL_DB_PORT:-8000}:8000'
+    volumes:
+      - surrealdb-data:/data
+
+volumes:
+  surrealdb-data: {}
