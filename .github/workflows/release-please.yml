@@ -60,7 +60,9 @@ jobs:
         uses: actions/setup-node@v6
         with:
           cache: pnpm
-          registry-url: https://registry.npmjs.org
+      
+      - name: Ensure npm supports trusted publishing
+        run: npm i -g npm@latest
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
