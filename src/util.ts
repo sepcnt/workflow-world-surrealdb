@@ -1,3 +1,6 @@
+import { globalSingleton } from '@workflow/utils';
+import { monotonicFactory } from 'ulid';
+
 export class Mutex {
 	promise: Promise<unknown> = Promise.resolve();
 
@@ -62,4 +65,17 @@ export function coerceErrorMessage(error: unknown): string {
 	}
 
 	return typeof error === 'string' ? error : JSON.stringify(error);
+}
+
+/**
+ * Process-wide ULID factories. Held on `globalThis` so every copy of this
+ * module a host bundles into a separate module graph shares one monotonic
+ * sequence.
+ */
+export function ids() {
+	return globalSingleton('workflow-world-surrealdb//ids', 1, () => ({
+		runId: monotonicFactory(),
+		messageId: monotonicFactory(),
+		chunkId: monotonicFactory(),
+	}));
 }

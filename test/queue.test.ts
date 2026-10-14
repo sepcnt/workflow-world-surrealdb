@@ -3,10 +3,10 @@ import { createServer, type Server } from 'node:http';
 import { JsonTransport } from '@vercel/queue';
 import {
 	MessageId,
-	StepInvokePayloadSchema,
 	type ValidQueueName,
+	WorkflowInvokePayloadSchema,
 } from '@workflow/world';
-import { createLocalWorld } from '@workflow/world-local';
+import { createWorld as createLocalWorld } from '@workflow/world-local';
 import { monotonicFactory } from 'ulid';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Tables } from '../src/constants.js';
@@ -343,12 +343,11 @@ describe('Queue (SurrealDB integration)', () => {
 
 		try {
 			const first = await world.queue(
-				'__wkf_step_idempotent-lane',
+				'__wkf_workflow_idempotent-lane',
 				{
-					workflowName: 'idempotent-lane',
-					workflowRunId: 'wrun_idempotent_lane',
-					workflowStartedAt: Date.now(),
+					runId: 'wrun_idempotent_lane',
 					stepId: 'step_idempotent_lane',
+					stepName: 'idempotent-lane',
 				},
 				{
 					delaySeconds: 60,
@@ -356,12 +355,11 @@ describe('Queue (SurrealDB integration)', () => {
 				}
 			);
 			const second = await world.queue(
-				'__wkf_step_idempotent-lane',
+				'__wkf_workflow_idempotent-lane',
 				{
-					workflowName: 'idempotent-lane',
-					workflowRunId: 'wrun_idempotent_lane',
-					workflowStartedAt: Date.now(),
+					runId: 'wrun_idempotent_lane',
 					stepId: 'step_idempotent_lane',
+					stepName: 'idempotent-lane',
 				},
 				{
 					delaySeconds: 60,
@@ -403,9 +401,12 @@ describe('Queue (SurrealDB integration)', () => {
 		const delivered = createDeferred<void>();
 		const expectedJobs = 12;
 		const stepHandler = handlerWorld.createQueueHandler(
-			'__wkf_step_',
+			'__wkf_workflow_',
 			async (message) => {
-				const payload = StepInvokePayloadSchema.parse(message);
+				const payload = WorkflowInvokePayloadSchema.parse(message);
+				if (!payload.stepId) {
+					throw new Error('expected a step message');
+				}
 				seen.set(payload.stepId, (seen.get(payload.stepId) || 0) + 1);
 				if (seen.size === expectedJobs) {
 					delivered.resolve();
@@ -413,7 +414,7 @@ describe('Queue (SurrealDB integration)', () => {
 			}
 		);
 		const server = await startFlowServer(async (request) => {
-			if (request.url.endsWith('/.well-known/workflow/v1/step')) {
+			if (request.url.endsWith('/.well-known/workflow/v1/flow')) {
 				return stepHandler(request);
 			}
 
@@ -437,11 +438,10 @@ describe('Queue (SurrealDB integration)', () => {
 
 			const queued = await Promise.all(
 				Array.from({ length: expectedJobs }, async (_, index) => {
-					const message = await workerA.queue('__wkf_step_multi-worker', {
-						workflowName: 'multi-worker',
-						workflowRunId: `wrun_multi_${index}`,
-						workflowStartedAt: Date.now(),
+					const message = await workerA.queue('__wkf_workflow_multi-worker', {
+						runId: `wrun_multi_${index}`,
 						stepId: `step_multi_${index}`,
+						stepName: 'multi-worker',
 					});
 
 					return MessageId.parse(message.messageId!);
@@ -470,9 +470,12 @@ describe('Queue (SurrealDB integration)', () => {
 		const delivered = createDeferred<void>();
 		const expectedJobs = 60;
 		const stepHandler = handlerWorld.createQueueHandler(
-			'__wkf_step_',
+			'__wkf_workflow_',
 			async (message, meta) => {
-				const payload = StepInvokePayloadSchema.parse(message);
+				const payload = WorkflowInvokePayloadSchema.parse(message);
+				if (!payload.stepId) {
+					throw new Error('expected a step message');
+				}
 				const stepIndex = Number.parseInt(
 					payload.stepId.slice(payload.stepId.lastIndexOf('_') + 1),
 					10
@@ -493,7 +496,7 @@ describe('Queue (SurrealDB integration)', () => {
 			}
 		);
 		const server = await startFlowServer(async (request) => {
-			if (request.url.endsWith('/.well-known/workflow/v1/step')) {
+			if (request.url.endsWith('/.well-known/workflow/v1/flow')) {
 				return stepHandler(request);
 			}
 
@@ -514,11 +517,10 @@ describe('Queue (SurrealDB integration)', () => {
 
 			const queued = await Promise.all(
 				Array.from({ length: expectedJobs }, async (_, index) => {
-					const message = await workers[0].queue('__wkf_step_retry-race', {
-						workflowName: 'retry-race',
-						workflowRunId: `wrun_retry_${index}`,
-						workflowStartedAt: Date.now(),
+					const message = await workers[0].queue('__wkf_workflow_retry-race', {
+						runId: `wrun_retry_${index}`,
 						stepId: `step_retry_${index}`,
+						stepName: 'retry-race',
 					});
 
 					return MessageId.parse(message.messageId!);

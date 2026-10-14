@@ -84,6 +84,27 @@ export class SurrealRpcClient {
 		}
 	}
 
+	/**
+	 * Defines the configured namespace and database when they are missing.
+	 * SurrealDB 3 no longer creates them implicitly on first use, so a fresh
+	 * server rejects every query until they exist. Requires a user allowed to
+	 * define them (root, or namespace-level for the database).
+	 */
+	async defineNamespaceAndDatabase(): Promise<void> {
+		const { namespace, database } = this.config;
+		if (!namespace || !database) {
+			return;
+		}
+		await this.connect();
+		const ident = (value: string) => `\`${value.replace(/`/g, '\\`')}\``;
+		await this.db
+			.query(
+				`DEFINE NAMESPACE IF NOT EXISTS ${ident(namespace)}; USE NS ${ident(namespace)}; DEFINE DATABASE IF NOT EXISTS ${ident(database)};`
+			)
+			.responses();
+		await this.db.use({ namespace, database });
+	}
+
 	async reconnect(): Promise<void> {
 		await this.close();
 		this.db = new Surreal();
@@ -139,6 +160,28 @@ export class SurrealRpcClient {
 		}
 
 		return results;
+	}
+
+	/**
+	 * Runs a multi-statement query whose statements succeed or fail together
+	 * (a `BEGIN` / `COMMIT` block). A failed transaction reports every
+	 * statement as failed, mostly with a generic "not executed" message, so the
+	 * thrown error joins all of them to keep the cause readable.
+	 */
+	async transaction(
+		sql: string,
+		vars?: Record<string, unknown>
+	): Promise<void> {
+		await this.connect();
+		const responses = await this.db.query(sql, vars).responses();
+		const failures = responses
+			.filter((response) => !response.success)
+			.map((response) =>
+				coerceErrorMessage((response as any).error?.message ?? response)
+			);
+		if (failures.length > 0) {
+			throw new Error(failures.join('; '));
+		}
 	}
 
 	async run<T = unknown>(name: string, args: unknown[] = []): Promise<T> {

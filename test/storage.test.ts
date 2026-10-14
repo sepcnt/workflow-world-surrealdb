@@ -1,4 +1,7 @@
+import { EntityConflictError, RunExpiredError } from '@workflow/errors';
+import { eventIdToSlot, slotToEventId } from '@workflow/world';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { SurrealRpcClient } from '../src/rpc.js';
 import {
 	createEventsStorage,
 	createHooksStorage,
@@ -238,5 +241,170 @@ describe('Storage (SurrealDB integration)', () => {
 		expect(conflict.event?.eventType).toBe('hook_conflict');
 		expect(conflict.hook).toBeUndefined();
 		expect((await hooks.list({})).data).toHaveLength(1);
+	});
+
+	async function createRun(workflowName = 'slot-workflow') {
+		const created = await events.create(null, {
+			eventType: 'run_created',
+			eventData: {
+				deploymentId: 'dep-surreal',
+				workflowName,
+				input: new Uint8Array(),
+			},
+		});
+		return created.run!.runId;
+	}
+
+	it('numbers events densely by slot from 1', async () => {
+		const runId = await createRun();
+		await events.create(runId, { eventType: 'run_started' });
+		await events.create(runId, {
+			eventType: 'step_created',
+			correlationId: 'step_slot_1',
+			eventData: { stepName: 'slot', input: new Uint8Array() },
+		});
+
+		const listed = await events.list({ runId });
+		expect(listed.data.map((event) => event.eventId)).toEqual([
+			slotToEventId(1),
+			slotToEventId(2),
+			slotToEventId(3),
+		]);
+	});
+
+	it('answers a repeated run_started without journaling an event', async () => {
+		const runId = await createRun();
+		const first = await events.create(runId, { eventType: 'run_started' });
+		const second = await events.create(runId, { eventType: 'run_started' });
+
+		expect(first.event?.eventType).toBe('run_started');
+		expect(second.event).toBeUndefined();
+		expect(second.run?.status).toBe('running');
+		expect((await events.list({ runId })).data).toHaveLength(2);
+	});
+
+	it('keeps slots dense and reports skipped events when writers in separate processes race', async () => {
+		const runId = await createRun();
+		await events.create(runId, { eventType: 'run_started' });
+
+		// Separate clients and storage instances share nothing in process, so
+		// only the store can settle the race, as between two deployments.
+		const writers = await Promise.all(
+			Array.from({ length: 4 }, async () => {
+				const client = new SurrealRpcClient(env.config);
+				return {
+					client,
+					events: createEventsStorage(client, async () => {}),
+				};
+			})
+		);
+		const width = 24;
+		try {
+			const results = await Promise.all(
+				Array.from({ length: width }, (_, index) =>
+					writers[index % writers.length].events.create(
+						runId,
+						{
+							eventType: 'step_created',
+							correlationId: `step_race_${index}`,
+							eventData: { stepName: 'race', input: new Uint8Array() },
+						},
+						// Every writer replayed the same two-event log.
+						{ eventCount: 2 }
+					)
+				)
+			);
+
+			const listed = await events.list({
+				runId,
+				pagination: { limit: 1000 },
+			});
+			expect(listed.data.map((event) => eventIdToSlot(event.eventId))).toEqual(
+				Array.from({ length: width + 2 }, (_, index) => index + 1)
+			);
+
+			for (const result of results) {
+				const committed = eventIdToSlot(result.event!.eventId)!;
+				const reported = (result.events ?? []).map((event) =>
+					eventIdToSlot(event.eventId)
+				);
+				expect(reported).toEqual(
+					Array.from({ length: committed - 3 }, (_, index) => index + 3)
+				);
+				expect(result.hasMore ?? false).toBe(false);
+			}
+		} finally {
+			await Promise.all(writers.map((writer) => writer.client.close()));
+		}
+	}, 60_000);
+
+	it('refuses step_started on a terminal run even while the step reads running', async () => {
+		const runId = await createRun();
+		await events.create(runId, { eventType: 'run_started' });
+		await events.create(runId, {
+			eventType: 'step_created',
+			correlationId: 'step_terminal',
+			eventData: { stepName: 'terminal', input: new Uint8Array() },
+		});
+		await events.create(runId, {
+			eventType: 'step_started',
+			correlationId: 'step_terminal',
+		});
+		await events.create(runId, { eventType: 'run_cancelled' });
+
+		expect((await steps.get(runId, 'step_terminal')).status).toBe('running');
+		await expect(
+			events.create(runId, {
+				eventType: 'step_started',
+				correlationId: 'step_terminal',
+			})
+		).rejects.toSatisfy((error) => RunExpiredError.is(error));
+		// The step already in flight may still record its outcome.
+		const completed = await events.create(runId, {
+			eventType: 'step_completed',
+			correlationId: 'step_terminal',
+			eventData: { result: new Uint8Array([1]) },
+		});
+		expect(completed.step?.status).toBe('completed');
+	});
+
+	it('creates the step on a lazy step_started exactly once', async () => {
+		const runId = await createRun();
+		await events.create(runId, { eventType: 'run_started' });
+		const lazyStart = {
+			eventType: 'step_started' as const,
+			correlationId: 'step_lazy',
+			eventData: { stepName: 'lazy', input: new Uint8Array([7]) },
+		};
+
+		const started = await events.create(runId, lazyStart);
+		expect(started.stepCreated).toBe(true);
+		expect(started.step).toMatchObject({ status: 'running', attempt: 1 });
+		expect(started.step?.input).toEqual(new Uint8Array([7]));
+		await expect(events.create(runId, lazyStart)).rejects.toSatisfy((error) =>
+			EntityConflictError.is(error)
+		);
+
+		const listed = await events.list({ runId });
+		expect(listed.data.map((event) => event.eventType)).toEqual([
+			'run_created',
+			'run_started',
+			'step_created',
+			'step_started',
+		]);
+	});
+
+	it('filters runs by any of several statuses', async () => {
+		const pendingRun = await createRun('status-a');
+		const runningRun = await createRun('status-b');
+		await events.create(runningRun, { eventType: 'run_started' });
+		const cancelledRun = await createRun('status-c');
+		await events.create(cancelledRun, { eventType: 'run_cancelled' });
+
+		const listed = await runs.list({ status: ['pending', 'cancelled'] });
+		expect(listed.data.map((run) => run.runId).sort()).toEqual(
+			[pendingRun, cancelledRun].sort()
+		);
+		expect((await runs.list({ status: [] })).data).toEqual([]);
 	});
 });

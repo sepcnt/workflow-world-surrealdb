@@ -37,7 +37,12 @@ export function createRunsStorage(
 				conditions.push('workflowName == $workflowName');
 				vars.workflowName = params.workflowName;
 			}
-			if (params?.status) {
+			if (Array.isArray(params?.status)) {
+				// A run matches any listed status; an empty list matches nothing,
+				// like SQL `IN ()`.
+				conditions.push('status INSIDE $statuses');
+				vars.statuses = params.status;
+			} else if (params?.status) {
 				conditions.push('status == $status');
 				vars.status = params.status;
 			}

@@ -3,7 +3,7 @@ import type { Storage } from '@workflow/world';
 import { DEFAULT_RESOLVE_DATA_OPTION, Tables } from './constants.js';
 import { filterStepData } from './filters.js';
 import type { StepRow } from './records.js';
-import { deserializeStepRow, queryFirstRow, queryRows } from './records.js';
+import { deserializeStepRow, queryRows } from './records.js';
 import type { SurrealRpcClient } from './rpc.js';
 import type { EnsureSchema } from './storage-helpers.js';
 import { getStep } from './storage-helpers.js';
@@ -13,21 +13,10 @@ export function createStepsStorage(
 	ensureSchema: EnsureSchema
 ): Storage['steps'] {
 	return {
-		get: (async (runId: string | undefined, stepId: string, params?: any) => {
+		get: (async (runId: string, stepId: string, params?: any) => {
 			await ensureSchema();
 
-			const row = runId
-				? undefined
-				: await queryFirstRow<StepRow>(
-						client,
-						`SELECT * FROM ${Tables.steps} WHERE stepId == $stepId LIMIT 1;`,
-						{ stepId }
-					);
-			const step = row
-				? deserializeStepRow(row)
-				: runId
-					? await getStep(client, runId, stepId)
-					: undefined;
+			const step = await getStep(client, runId, stepId);
 
 			if (!step) {
 				throw new WorkflowWorldError(`Step not found: ${stepId}`);
