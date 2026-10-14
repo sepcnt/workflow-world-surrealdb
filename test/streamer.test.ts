@@ -38,17 +38,17 @@ describe('Streamer (SurrealDB integration)', () => {
 	it('replays stored chunks and continues with LIVE updates until EOF', async () => {
 		const runId = 'wrun_stream_live';
 
-		await streamer.writeToStream('stream-live', runId, 'alpha');
+		await streamer.streams.write(runId, 'stream-live', 'alpha');
 
-		const readable = await streamer.readFromStream('stream-live', 0);
+		const readable = await streamer.streams.get(runId, 'stream-live', 0);
 		const readAll = collectReadableStream(readable);
 
-		await streamer.writeToStream('stream-live', runId, 'beta');
-		await streamer.writeToStreamMulti?.('stream-live', runId, [
+		await streamer.streams.write(runId, 'stream-live', 'beta');
+		await streamer.streams.writeMulti?.(runId, 'stream-live', [
 			'gamma',
 			'delta',
 		]);
-		await streamer.closeStream('stream-live', runId);
+		await streamer.streams.close(runId, 'stream-live');
 
 		expect(decodeUtf8Chunks(await readAll)).toEqual([
 			'alpha',
@@ -57,14 +57,14 @@ describe('Streamer (SurrealDB integration)', () => {
 			'delta',
 		]);
 
-		const page1 = await streamer.getStreamChunks('stream-live', runId, {
+		const page1 = await streamer.streams.getChunks(runId, 'stream-live', {
 			limit: 2,
 		});
-		const page2 = await streamer.getStreamChunks('stream-live', runId, {
+		const page2 = await streamer.streams.getChunks(runId, 'stream-live', {
 			limit: 2,
 			cursor: page1.cursor ?? undefined,
 		});
-		const info = await streamer.getStreamInfo('stream-live', runId);
+		const info = await streamer.streams.getInfo(runId, 'stream-live');
 
 		expect(decodeUtf8Chunks(page1.data.map((chunk) => chunk.data))).toEqual([
 			'alpha',

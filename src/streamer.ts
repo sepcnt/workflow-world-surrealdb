@@ -5,7 +5,6 @@ import type {
 	StreamInfoResponse,
 } from '@workflow/world';
 import { eeq } from 'surrealdb';
-import { monotonicFactory } from 'ulid';
 import type { SurrealWorldConfig } from './config.js';
 import { Tables } from './constants.js';
 import {
@@ -18,7 +17,7 @@ import {
 import type { LiveSubscription, SurrealRpcClient } from './rpc.js';
 import { SurrealRpcClient as LiveRpcClient } from './rpc.js';
 import type { EnsureSchema } from './storage-helpers.js';
-import { Mutex, toBytes } from './util.js';
+import { ids, Mutex, toBytes } from './util.js';
 
 function encodeCursor(value: Record<string, unknown>): string {
 	return encodeURIComponent(JSON.stringify(value));
@@ -40,7 +39,7 @@ export type SurrealStreamer = Streamer & {
 	close(): Promise<void>;
 };
 
-const generateUlid = monotonicFactory();
+const generateUlid = () => ids().chunkId();
 
 export function createStreamer(
 	client: SurrealRpcClient,
@@ -174,14 +173,9 @@ export function createStreamer(
 		});
 	}
 
-	return {
-		async writeToStream(
-			name: string,
-			_runId: string | Promise<string>,
-			chunk: string | Uint8Array
-		) {
+	const streams: SurrealStreamer['streams'] = {
+		async write(runId: string, name: string, chunk: string | Uint8Array) {
 			await ensureSchema();
-			const runId = await _runId;
 			await writeChunk(
 				name,
 				runId,
@@ -191,9 +185,9 @@ export function createStreamer(
 			);
 		},
 
-		async writeToStreamMulti(
+		async writeMulti(
+			runId: string,
 			name: string,
-			_runId: string | Promise<string>,
 			chunks: (string | Uint8Array)[]
 		) {
 			await ensureSchema();
@@ -201,7 +195,6 @@ export function createStreamer(
 				return;
 			}
 
-			const runId = await _runId;
 			if (chunks.length === 1) {
 				await writeChunk(
 					name,
@@ -243,9 +236,8 @@ export function createStreamer(
 			});
 		},
 
-		async closeStream(name: string, _runId: string | Promise<string>) {
+		async close(runId: string, name: string) {
 			await ensureSchema();
-			const runId = await _runId;
 			await writeChunk(
 				name,
 				runId,
@@ -255,9 +247,9 @@ export function createStreamer(
 			);
 		},
 
-		async getStreamChunks(
-			name: string,
+		async getChunks(
 			_runId: string,
+			name: string,
 			options?: GetChunksOptions
 		): Promise<StreamChunksResponse> {
 			await ensureSchema();
@@ -307,10 +299,7 @@ export function createStreamer(
 			};
 		},
 
-		async getStreamInfo(
-			name: string,
-			_runId: string
-		): Promise<StreamInfoResponse> {
+		async getInfo(_runId: string, name: string): Promise<StreamInfoResponse> {
 			await ensureSchema();
 			const stream = await getStream(name);
 			return {
@@ -319,7 +308,8 @@ export function createStreamer(
 			};
 		},
 
-		async readFromStream(
+		async get(
+			_runId: string,
 			name: string,
 			startIndex = 0
 		): Promise<ReadableStream<Uint8Array>> {
@@ -442,7 +432,7 @@ export function createStreamer(
 			});
 		},
 
-		async listStreamsByRunId(runId: string): Promise<string[]> {
+		async list(runId: string): Promise<string[]> {
 			await ensureSchema();
 			const rows = await queryRows<StreamRow>(
 				client,
@@ -455,7 +445,10 @@ export function createStreamer(
 			);
 			return rows.map((row) => row.streamId);
 		},
+	};
 
+	return {
+		streams,
 		async close() {
 			for (const closer of [...activeClosers]) {
 				await closer();

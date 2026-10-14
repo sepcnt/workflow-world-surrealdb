@@ -1,4 +1,11 @@
-import type { Queue, Storage, ValidQueueName, World } from '@workflow/world';
+import {
+	mintedSpecVersion,
+	type Queue,
+	type SpecVersion,
+	type Storage,
+	type ValidQueueName,
+	type World,
+} from '@workflow/world';
 import type { SurrealWorldConfig } from './config.js';
 import { resolveConfig } from './config.js';
 import { createQueue } from './queue.js';
@@ -51,11 +58,12 @@ async function reenqueueActiveRuns(
 
 function createStorage(
 	client: SurrealRpcClient,
-	ensureSchema: () => Promise<void>
+	ensureSchema: () => Promise<void>,
+	specVersion: SpecVersion
 ): Storage {
 	return {
 		runs: createRunsStorage(client, ensureSchema),
-		events: createEventsStorage(client, ensureSchema),
+		events: createEventsStorage(client, ensureSchema, { specVersion }),
 		hooks: createHooksStorage(client, ensureSchema),
 		steps: createStepsStorage(client, ensureSchema),
 	};
@@ -67,11 +75,15 @@ export function createWorld(
 	const resolved = resolveConfig(config);
 	const client = new SurrealRpcClient(resolved);
 	const ensureSchema = createSchemaEnsurer(client);
-	const storage = createStorage(client, ensureSchema);
+	// Read per World, so one process can create Worlds with and without
+	// `WORKFLOW_SEALED_LOG=0`.
+	const specVersion = mintedSpecVersion();
+	const storage = createStorage(client, ensureSchema, specVersion);
 	const queue = createQueue(resolved, client, ensureSchema);
 	const streamer = createStreamer(client, resolved, ensureSchema);
 
 	return {
+		specVersion,
 		...storage,
 		...queue,
 		...streamer,

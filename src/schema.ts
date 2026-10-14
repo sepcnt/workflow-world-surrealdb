@@ -11,7 +11,10 @@ export const schemaStatements = `DEFINE TABLE IF NOT EXISTS workflow_runs SCHEMA
     DEFINE FIELD IF NOT EXISTS executionContext ON TABLE workflow_runs TYPE option<object> FLEXIBLE;
     DEFINE FIELD IF NOT EXISTS input ON TABLE workflow_runs TYPE bytes;
     DEFINE FIELD IF NOT EXISTS output ON TABLE workflow_runs TYPE option<bytes>;
-    DEFINE FIELD IF NOT EXISTS error ON TABLE workflow_runs TYPE option<object> FLEXIBLE;
+    DEFINE FIELD OVERWRITE error ON TABLE workflow_runs TYPE option<bytes | object> FLEXIBLE;
+    DEFINE FIELD IF NOT EXISTS errorCode ON TABLE workflow_runs TYPE option<string>;
+    DEFINE FIELD IF NOT EXISTS attributes ON TABLE workflow_runs TYPE option<object> FLEXIBLE;
+    DEFINE FIELD IF NOT EXISTS encryptionPublicKey ON TABLE workflow_runs TYPE option<string>;
     DEFINE FIELD IF NOT EXISTS createdAt ON TABLE workflow_runs TYPE datetime;
     DEFINE FIELD IF NOT EXISTS updatedAt ON TABLE workflow_runs TYPE datetime;
     DEFINE FIELD IF NOT EXISTS startedAt ON TABLE workflow_runs TYPE option<datetime>;
@@ -44,7 +47,7 @@ export const schemaStatements = `DEFINE TABLE IF NOT EXISTS workflow_runs SCHEMA
     DEFINE FIELD IF NOT EXISTS status ON TABLE workflow_steps TYPE string;
     DEFINE FIELD IF NOT EXISTS input ON TABLE workflow_steps TYPE bytes;
     DEFINE FIELD IF NOT EXISTS output ON TABLE workflow_steps TYPE option<bytes>;
-    DEFINE FIELD IF NOT EXISTS error ON TABLE workflow_steps TYPE option<object> FLEXIBLE;
+    DEFINE FIELD OVERWRITE error ON TABLE workflow_steps TYPE option<bytes | object> FLEXIBLE;
     DEFINE FIELD IF NOT EXISTS attempt ON TABLE workflow_steps TYPE int;
     DEFINE FIELD IF NOT EXISTS startedAt ON TABLE workflow_steps TYPE option<datetime>;
     DEFINE FIELD IF NOT EXISTS completedAt ON TABLE workflow_steps TYPE option<datetime>;
@@ -72,6 +75,8 @@ export const schemaStatements = `DEFINE TABLE IF NOT EXISTS workflow_runs SCHEMA
     DEFINE FIELD IF NOT EXISTS createdAt ON TABLE workflow_hooks TYPE datetime;
     DEFINE FIELD IF NOT EXISTS specVersion ON TABLE workflow_hooks TYPE option<int>;
     DEFINE FIELD IF NOT EXISTS isWebhook ON TABLE workflow_hooks TYPE bool;
+    DEFINE FIELD IF NOT EXISTS isSystem ON TABLE workflow_hooks TYPE option<bool>;
+    DEFINE FIELD IF NOT EXISTS tokenRetentionUntil ON TABLE workflow_hooks TYPE option<datetime>;
     DEFINE INDEX IF NOT EXISTS workflow_hooks_run_hook ON TABLE workflow_hooks
       FIELDS runId, hookId;
     DEFINE INDEX IF NOT EXISTS workflow_hooks_token_hash ON TABLE workflow_hooks
@@ -580,7 +585,7 @@ export const schemaStatements = `DEFINE TABLE IF NOT EXISTS workflow_runs SCHEMA
       };
 
       LET $completed = SELECT VALUE
-        fn::workflow::queue::complete_claimed_only($this, $workerId)
+        fn::workflow::queue::complete_claimed_only($this.id, $workerId)
       FROM $jobs;
       LET $rows = $completed.filter(|$job| $job != NONE);
       LET $laneDeltas = SELECT
@@ -618,7 +623,7 @@ export const schemaStatements = `DEFINE TABLE IF NOT EXISTS workflow_runs SCHEMA
       LET $readyPerJob = IF $nextAvailableAt <= $now { 1 } ELSE { 0 };
       LET $requeued = SELECT VALUE
         fn::workflow::queue::requeue_claimed_only(
-          $this,
+          $this.id,
           $workerId,
           $delay,
           $incrementAttempt,
@@ -661,7 +666,7 @@ export const schemaStatements = `DEFINE TABLE IF NOT EXISTS workflow_runs SCHEMA
       LET $readyPerJob = IF $nextAvailableAt <= $now { 1 } ELSE { 0 };
       LET $retried = SELECT VALUE
         fn::workflow::queue::requeue_claimed_only(
-          $this,
+          $this.id,
           $workerId,
           $delay,
           true,
@@ -827,7 +832,7 @@ export const schemaStatements = `DEFINE TABLE IF NOT EXISTS workflow_runs SCHEMA
         LIMIT $limit
       ).id;
       LET $claimed = SELECT VALUE
-        fn::workflow::queue::claim_candidate($this, $workerId, $lease, $now)
+        fn::workflow::queue::claim_candidate($this.id, $workerId, $lease, $now)
       FROM $candidates;
       LET $jobs = $claimed.filter(|$job| $job != NONE);
 
@@ -849,7 +854,8 @@ export const schemaStatements = `DEFINE TABLE IF NOT EXISTS workflow_runs SCHEMA
         workflowRunId: $this.workflowRunId,
         body: $this.body,
         headers: $this.headers,
-        attempt: $this.attempt
+        attempt: $this.attempt,
+        createdAt: $this.createdAt
       } FROM $jobs;
     };
   
@@ -888,7 +894,7 @@ export const schemaStatements = `DEFINE TABLE IF NOT EXISTS workflow_runs SCHEMA
         LIMIT $limit
       ).id;
       LET $recovered = SELECT VALUE
-        fn::workflow::queue::recover_candidate($this, $now)
+        fn::workflow::queue::recover_candidate($this.id, $now)
       FROM $candidates;
       LET $jobs = $recovered.filter(|$job| $job != NONE);
       LET $_ = SELECT VALUE
@@ -914,6 +920,13 @@ export function createSchemaEnsurer(client: SurrealRpcClient) {
 		if (!promise) {
 			promise = retrySurrealWrite(
 				async () => {
+					// Defined up front rather than on a "does not exist" error: a
+					// schema query that first fails against a missing namespace
+					// leaves the session unable to run it again
+					// ("FLEXIBLE can only be used in SCHEMAFULL tables") on
+					// SurrealDB 3.2. A user without permission to define them must
+					// be given an existing namespace and database.
+					await client.defineNamespaceAndDatabase().catch(() => {});
 					await client.query(schemaStatements);
 				},
 				{

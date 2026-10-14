@@ -2,6 +2,10 @@
 
 SurrealDB-backed World implementation for Workflow SDK. This package stores workflow state in SurrealDB and uses `LIVE SELECT` to drive queue wake-ups and stream fan-out, with `SHOW CHANGES` as the recovery path after a live subscription reconnects.
 
+## Compatibility
+
+This package implements the Workflow SDK 5 World contract and declares its spec version with `mintedSpecVersion()` from `@workflow/world` (spec version 8 by default, 6 with `WORKFLOW_SEALED_LOG=0`). Use it with `workflow` 5.x. 0.1.x implements the Workflow SDK 4 contract and is rejected by `workflow` 5.
+
 ## Installation
 
 ```bash
@@ -38,6 +42,7 @@ export WORKFLOW_SURREAL_QUEUE_CONCURRENCY="10"
 export WORKFLOW_SURREAL_QUEUE_LEASE_MS="300000"
 export WORKFLOW_SURREAL_QUEUE_HEARTBEAT_MS="10000"
 export WORKFLOW_SURREAL_QUEUE_LANE_SHARDS="16"
+# Ignored since Workflow SDK 5, which delivers steps on the workflow queue
 export WORKFLOW_SURREAL_STEP_QUEUE_LANE_SHARDS="16"
 export WORKFLOW_SURREAL_WORKFLOW_QUEUE_LANE_SHARDS="16"
 export WORKFLOW_SURREAL_LIVE_RECONNECT_DELAY_MS="1000"
@@ -94,6 +99,7 @@ pnpm --filter workflow-world-surrealdb db:push
 ## Design notes
 
 - Workflow entities still follow the same event-sourced contract as the other worlds: `events.create()` is the only write entrypoint for run, step, hook, and wait state.
+- Event ids are slot positions (`slotToEventId()` from `@workflow/world`): a run's events are numbered densely from 1. Each `events.create()` reads the run's highest slot, then applies its entity changes and appends its event at the next slot in one SurrealDB transaction. The event record key `${runId}:${eventId}` is the uniqueness constraint, so a concurrent writer that took the slot makes the transaction roll back, and the create is retried from fresh reads. A write that lands above the slot its writer expected (`eventCount + 1`) returns the events it skipped over.
 - The schema is Surreal-first: tables are `SCHEMAFULL`, hot query paths are indexed explicitly, and hook uniqueness is enforced with `tokenHash` instead of an auxiliary lock table.
 - Queue scheduling is live-first: workers subscribe to lane summary rows with `readyCount > 0`, and a short idle poll only refreshes due lanes and expired leases instead of scanning the whole jobs table each cycle.
 - Queue retry timing now follows a Graphile-style exponential backoff for handler failures, with the delay computed inside SurrealDB functions so retry scheduling uses database time instead of process-local time.
@@ -105,5 +111,7 @@ pnpm --filter workflow-world-surrealdb db:push
 
 ## Current limitations
 
+- Runs created by 0.1.x of this package (Workflow SDK 4) use ULID event ids and cannot be replayed by Workflow SDK 5. Drain them on the old release before upgrading.
+- SurrealDB 3 no longer creates a namespace or database on first use. Schema setup defines the configured ones when the user is allowed to; otherwise create them before starting the World.
 - This package is currently optimized for the single-node Live Query model described in SurrealDB’s documentation.
 - This package does not preserve any pre-Surreal legacy storage mode; it expects records created by the current `workflow-world-surrealdb` implementation.

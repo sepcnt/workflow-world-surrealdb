@@ -1,15 +1,15 @@
-import { JsonTransport } from '@vercel/queue';
+import type { Transport } from '@vercel/queue';
+import { createWorkflowUrl } from '@workflow/utils';
 import {
 	MessageId,
+	parseQueueName,
 	type Queue,
 	QueuePayloadSchema,
-	type QueuePrefix,
 	type ValidQueueName,
 	WorkflowInvokePayloadSchema,
 } from '@workflow/world';
-import { createLocalWorld } from '@workflow/world-local';
+import { createWorld as createLocalWorld } from '@workflow/world-local';
 import { Duration, gt, RecordId } from 'surrealdb';
-import { monotonicFactory } from 'ulid';
 import {
 	type ResolvedSurrealWorldConfig,
 	resolveExecutionBaseUrl,
@@ -28,9 +28,46 @@ import {
 import type { EnsureSchema } from './storage-helpers.js';
 import {
 	coerceErrorMessage,
+	ids,
 	isRetryableSurrealWriteConflict,
 	retrySurrealWrite,
 } from './util.js';
+
+/**
+ * JSON transport that preserves `Uint8Array` values through a tagged envelope
+ * (`{ __type: 'Uint8Array', data: '<base64>' }`), the encoding the
+ * `@workflow/world-local` queue handler decodes. Queue payloads carry
+ * serialized step and hook inputs as bytes.
+ */
+const transport: Transport<unknown> = {
+	contentType: 'application/json',
+	serialize(value: unknown): Buffer {
+		return Buffer.from(
+			JSON.stringify(value, (_key, v) =>
+				v instanceof Uint8Array
+					? { __type: 'Uint8Array', data: Buffer.from(v).toString('base64') }
+					: v
+			)
+		);
+	},
+	async deserialize(stream: ReadableStream<Uint8Array>): Promise<unknown> {
+		const chunks: Uint8Array[] = [];
+		const reader = stream.getReader();
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (value) chunks.push(value);
+		}
+		return JSON.parse(Buffer.concat(chunks).toString(), (_key, v) =>
+			v !== null &&
+			typeof v === 'object' &&
+			v.__type === 'Uint8Array' &&
+			typeof v.data === 'string'
+				? new Uint8Array(Buffer.from(v.data, 'base64'))
+				: v
+		);
+	},
+};
 
 class Semaphore {
 	private active = 0;
@@ -131,8 +168,7 @@ export function createQueue(
 	ensureSchema: EnsureSchema
 ): SurrealQueue {
 	const liveClient = new SurrealRpcClient(config);
-	const transport = new JsonTransport();
-	const generateMessageId = monotonicFactory();
+	const generateMessageId = ids().messageId;
 	const localWorld = createLocalWorld();
 	const semaphore = new Semaphore(config.queueConcurrency);
 	const queueLeaseMs = config.queueLeaseMs;
@@ -141,7 +177,6 @@ export function createQueue(
 		DEFAULT_QUEUE_DRAIN_LEASE_MS,
 		Math.min(queueLeaseMs, queueHeartbeatMs * 2)
 	);
-	const stepQueueLaneShards = config.stepQueueLaneShards;
 	const workflowQueueLaneShards = config.workflowQueueLaneShards;
 	const liveReconnectDelayMs = config.liveReconnectDelayMs;
 	const workerId = `surreal-worker-${process.pid}-${generateMessageId()}`;
@@ -161,17 +196,6 @@ export function createQueue(
 	let terminalFlushPromise: Promise<void> | null = null;
 	let liveFeed: LiveSubscription | null = null;
 	let unsubscribeClose: (() => void) | null = null;
-
-	function parseQueueName(name: ValidQueueName): [QueuePrefix, string] {
-		const prefixes: QueuePrefix[] = ['__wkf_step_', '__wkf_workflow_'];
-		for (const prefix of prefixes) {
-			if (name.startsWith(prefix)) {
-				return [prefix, name.slice(prefix.length)];
-			}
-		}
-
-		throw new Error(`Invalid queue name: ${name}`);
-	}
 
 	function durationLiteralFromMs(ms: number): string {
 		return `${Math.max(0, Math.ceil(ms))}ms`;
@@ -210,27 +234,12 @@ export function createQueue(
 	function buildLaneKey(args: {
 		messageId: string;
 		queueName: ValidQueueName;
-		queuePrefix: QueuePrefix;
 		workflowRunId?: string;
 	}): string {
 		const laneShard =
 			hashLaneValue(args.workflowRunId || args.messageId) %
-			(args.queuePrefix === '__wkf_workflow_'
-				? workflowQueueLaneShards
-				: stepQueueLaneShards);
+			workflowQueueLaneShards;
 		return `${args.queueName}:shard:${laneShard}`;
-	}
-
-	function getQueueRoute(queueName: ValidQueueName): 'flow' | 'step' {
-		if (queueName.startsWith('__wkf_step_')) {
-			return 'step';
-		}
-
-		if (queueName.startsWith('__wkf_workflow_')) {
-			return 'flow';
-		}
-
-		throw new Error('Unknown queue name prefix');
 	}
 
 	async function queryValue<T>(
@@ -741,12 +750,16 @@ export function createQueue(
 			'x-vqs-queue-name': row.queueName,
 			'x-vqs-message-id': row.messageId,
 			'x-vqs-message-attempt': String(row.attempt),
+			...(row.createdAt
+				? { 'x-vqs-message-created-at': new Date(row.createdAt).toISOString() }
+				: {}),
 		};
-		const pathname = getQueueRoute(row.queueName as ValidQueueName);
 		const body = toBinaryPayload(row.body);
 
+		// Workflow orchestration and queued steps share one route; a step
+		// message carries `stepId` / `stepName` in its payload.
 		const response = await fetch(
-			`${await getExecutionBaseUrl()}/.well-known/workflow/v1/${pathname}`,
+			createWorkflowUrl(await getExecutionBaseUrl(), { type: 'flow' }),
 			{
 				method: 'POST',
 				duplex: 'half',
@@ -978,14 +991,13 @@ export function createQueue(
 		await start();
 		QueuePayloadSchema.parse(message);
 
-		const body = toBinaryPayload(transport.serialize(message));
-		const [queuePrefix, queueId] = parseQueueName(queueName);
+		const body = toBinaryPayload(transport.serialize(message) as Buffer);
+		const { prefix: queuePrefix, id: queueId } = parseQueueName(queueName);
 		const workflowInvoke = WorkflowInvokePayloadSchema.safeParse(message);
 		const messageId = MessageId.parse(`msg_${generateMessageId()}`);
 		const laneKey = buildLaneKey({
 			messageId,
 			queueName,
-			queuePrefix,
 			workflowRunId: workflowInvoke.success
 				? workflowInvoke.data.runId
 				: undefined,

@@ -41,10 +41,10 @@
 	},
 	"dependencies": {
 		"@vercel/queue": "0.1.4",
-		"@workflow/errors": "4.1.0-beta.19",
-		"@workflow/utils": "4.1.0-beta.13",
-		"@workflow/world": "4.1.0-beta.14",
-		"@workflow/world-local": "4.1.0-beta.47",
+		"@workflow/errors": "5.0.4",
+		"@workflow/utils": "5.0.2",
+		"@workflow/world": "5.0.4",
+		"@workflow/world-local": "5.1.1",
 		"dotenv": "17.3.1",
 		"surrealdb": "2.0.3",
 		"ulid": "~3.0.2",
@@ -53,6 +53,7 @@
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.11",
 		"@types/node": "22.19.0",
+		"@workflow/world-testing": "5.0.5",
 		"testcontainers": "11.12.0",
 		"typescript": "^5.9.3",
 		"vitest": "^4.1.4"

@@ -29,6 +29,17 @@ function normalizeBinaryValue(
 	return value === undefined ? undefined : toBytes(value);
 }
 
+/**
+ * Errors are serialized bytes. Rows written before that hold a structured
+ * `{ message, stack, code }` object, which is passed through unchanged.
+ */
+function normalizeSerializedError(value: unknown): unknown {
+	if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
+		return toBytes(value);
+	}
+	return value ?? undefined;
+}
+
 function normalizeBinaryTree<T>(value: T): T {
 	if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
 		return toBytes(value) as T;
@@ -70,7 +81,10 @@ export interface RunRow {
 	executionContext?: Record<string, unknown>;
 	input: ArrayBuffer | Uint8Array;
 	output?: ArrayBuffer | Uint8Array;
-	error?: WorkflowRun['error'];
+	error?: ArrayBuffer | Uint8Array;
+	errorCode?: string;
+	attributes?: Record<string, string>;
+	encryptionPublicKey?: string;
 	createdAt: Date;
 	updatedAt: Date;
 	completedAt?: Date;
@@ -95,7 +109,7 @@ export interface StepRow {
 	status: Step['status'];
 	input: ArrayBuffer | Uint8Array;
 	output?: ArrayBuffer | Uint8Array;
-	error?: Step['error'];
+	error?: ArrayBuffer | Uint8Array;
 	attempt: number;
 	startedAt?: Date;
 	completedAt?: Date;
@@ -117,6 +131,8 @@ export interface HookRow {
 	createdAt: Date;
 	specVersion?: number;
 	isWebhook?: boolean;
+	isSystem?: boolean;
+	tokenRetentionUntil?: Date;
 }
 
 export interface WaitRow {
@@ -155,7 +171,7 @@ export interface QueueJobRow {
 	version: number;
 	laneKey: string;
 	queueName: string;
-	queuePrefix: '__wkf_step_' | '__wkf_workflow_';
+	queuePrefix: string;
 	queueId: string;
 	workflowRunId?: string;
 	body: ArrayBuffer | Uint8Array;
@@ -180,12 +196,13 @@ export type ClaimedQueueJobRow = Pick<
 	| 'body'
 	| 'headers'
 	| 'attempt'
+	| 'createdAt'
 >;
 
 export interface QueueLaneRow {
 	laneKey: string;
 	queueName: string;
-	queuePrefix: '__wkf_step_' | '__wkf_workflow_';
+	queuePrefix: string;
 	queueId: string;
 	queuedCount: number;
 	readyCount: number;
@@ -207,6 +224,8 @@ export function deserializeRunStored(row: RunRow): WorkflowRun {
 		executionContext: normalizeBinaryTree(row.executionContext),
 		input: toBytes(row.input),
 		output: normalizeBinaryValue(row.output),
+		error: normalizeSerializedError(row.error),
+		attributes: row.attributes ?? {},
 	});
 }
 
@@ -220,7 +239,10 @@ export function serializeRunStored(run: WorkflowRun): RunRow {
 		executionContext: run.executionContext,
 		input: run.input as Uint8Array,
 		output: run.output as Uint8Array | undefined,
-		error: run.error,
+		error: run.error as Uint8Array | undefined,
+		errorCode: run.errorCode,
+		attributes: run.attributes,
+		encryptionPublicKey: run.encryptionPublicKey,
 		createdAt: run.createdAt,
 		updatedAt: run.updatedAt,
 		completedAt: run.completedAt,
@@ -253,6 +275,7 @@ export function deserializeStepRow(row: StepRow): Step {
 		...row,
 		input: toBytes(row.input),
 		output: normalizeBinaryValue(row.output),
+		error: normalizeSerializedError(row.error),
 	});
 }
 
@@ -264,7 +287,7 @@ export function serializeStepRow(step: Step): StepRow {
 		status: step.status,
 		input: step.input as Uint8Array,
 		output: step.output as Uint8Array | undefined,
-		error: step.error,
+		error: step.error as Uint8Array | undefined,
 		attempt: step.attempt,
 		startedAt: step.startedAt,
 		completedAt: step.completedAt,
@@ -294,6 +317,8 @@ export function serializeHookRow(hook: Hook): HookRow {
 		createdAt: hook.createdAt,
 		specVersion: hook.specVersion,
 		isWebhook: hook.isWebhook ?? true,
+		isSystem: hook.isSystem,
+		tokenRetentionUntil: hook.tokenRetentionUntil,
 	};
 }
 
